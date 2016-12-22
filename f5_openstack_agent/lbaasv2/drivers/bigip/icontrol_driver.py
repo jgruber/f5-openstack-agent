@@ -49,6 +49,7 @@ from f5_openstack_agent.lbaasv2.drivers.bigip.lbaas_driver import \
 from f5_openstack_agent.lbaasv2.drivers.bigip import network_helper
 from f5_openstack_agent.lbaasv2.drivers.bigip.network_service import \
     NetworkServiceBuilder
+from f5_openstack_agent.lbaasv2.drivers.bigip import resource_helper
 from f5_openstack_agent.lbaasv2.drivers.bigip.service_adapter import \
     ServiceModelAdapter
 from f5_openstack_agent.lbaasv2.drivers.bigip import ssl_profile
@@ -57,9 +58,9 @@ from f5_openstack_agent.lbaasv2.drivers.bigip.system_helper import \
     SystemHelper
 from f5_openstack_agent.lbaasv2.drivers.bigip.tenants import \
     BigipTenantManager
-from f5_openstack_agent.lbaasv2.drivers.bigip.utils import OBJ_PREFIX
 from f5_openstack_agent.lbaasv2.drivers.bigip.utils import serialized
-from f5_openstack_agent.lbaasv2.drivers.bigip.utils import strip_domain_address
+from f5_openstack_agent.lbaasv2.drivers.bigip.virtual_address import \
+    VirtualAddress
 
 LOG = logging.getLogger(__name__)
 
@@ -338,6 +339,10 @@ class iControlDriver(LBaaSBaseDriver):
         self.network_helper = network_helper.NetworkHelper()
         self.disconnected_service = None
         self.disconnected_service_polling = None
+        self.vs_manager = resource_helper.BigIPResourceHelper(
+            resource_helper.ResourceType.virtual)
+        self.pool_manager = resource_helper.BigIPResourceHelper(
+            resource_helper.ResourceType.pool)
 
         if self.conf.f5_global_routed_mode:
             LOG.info('WARNING - f5_global_routed_mode enabled.'
@@ -582,7 +587,8 @@ class iControlDriver(LBaaSBaseDriver):
 
         if self.network_builder:
             for network in self.conf.common_network_ids.values():
-                if not self.network_builder.vlan_exists(network,
+                if not self.network_builder.vlan_exists(bigip,
+                                                        network,
                                                         folder='Common'):
                     raise f5ex.MissingNetwork(
                         'Common network %s on %s does not exist'
@@ -725,9 +731,8 @@ class iControlDriver(LBaaSBaseDriver):
         if self.network_builder:
             self.network_builder.set_l2pop_rpc(l2pop_rpc)
 
-    def exists(self, service):
-        # Check that service exists"""
-        return True
+    def service_exists(self, service):
+        return self._service_exists(service)
 
     def flush_cache(self):
         # Remove cached objects so they can be created if necessary
@@ -844,105 +849,35 @@ class iControlDriver(LBaaSBaseDriver):
 
     @is_connected
     def get_stats(self, service):
-        """Get service stats"""
-        # use pool stats because the pool_id is the
-        # the service definition...
-        stats = {}
-        stats[lb_const.STATS_IN_BYTES] = 0
-        stats[lb_const.STATS_OUT_BYTES] = 0
-        stats[lb_const.STATS_ACTIVE_CONNECTIONS] = 0
-        stats[lb_const.STATS_TOTAL_CONNECTIONS] = 0
-        # add a members stats return dictionary
-        members = {}
-        for hostbigip in self.get_all_bigips():
-            # It appears that stats are collected for pools in a pending delete
-            # state which means that if those messages are queued (or delayed)
-            # it can result in the process of a stats request after the pool
-            # and tenant are long gone. Check if the tenant exists.
-            if not service['pool'] or not hostbigip.system.folder_exists(
-                    OBJ_PREFIX + service['pool']['tenant_id']):
-                return None
-            pool = service['pool']
-            pool_stats = hostbigip.pool.get_statistics(
-                name=pool['id'],
-                folder=pool['tenant_id'],
-                config_mode=self.conf.icontrol_config_mode)
-            if 'STATISTIC_SERVER_SIDE_BYTES_IN' in pool_stats:
-                stats[lb_const.STATS_IN_BYTES] += \
-                    pool_stats['STATISTIC_SERVER_SIDE_BYTES_IN']
-                stats[lb_const.STATS_OUT_BYTES] += \
-                    pool_stats['STATISTIC_SERVER_SIDE_BYTES_OUT']
-                stats[lb_const.STATS_ACTIVE_CONNECTIONS] += \
-                    pool_stats['STATISTIC_SERVER_SIDE_CURRENT_CONNECTIONS']
-                stats[lb_const.STATS_TOTAL_CONNECTIONS] += \
-                    pool_stats['STATISTIC_SERVER_SIDE_TOTAL_CONNECTIONS']
-                # are there members to update status
-                if 'members' in service:
-                    # only query BIG-IP® pool members if they
-                    # not in a state indicating provisioning or error
-                    # provisioning the pool member
-                    some_members_require_status_update = False
-                    update_if_status = [plugin_const.ACTIVE,
-                                        plugin_const.DOWN,
-                                        plugin_const.INACTIVE]
-                    if plugin_const.ACTIVE not in update_if_status:
-                        update_if_status.append(plugin_const.ACTIVE)
+        lb_stats = {}
+        stats = ['clientside.bitsIn',
+                 'clientside.bitsOut',
+                 'clientside.curConns',
+                 'clientside.totConns']
+        loadbalancer = service['loadbalancer']
 
-                    for member in service['members']:
-                        if member['status'] in update_if_status:
-                            some_members_require_status_update = True
-                    # are we have members who are in a
-                    # state to update there status
-                    if some_members_require_status_update:
-                        # query pool members on each BIG-IP
-                        monitor_states = \
-                            hostbigip.pool.get_members_monitor_status(
-                                name=pool['id'],
-                                folder=pool['tenant_id'],
-                                config_mode=self.conf.icontrol_config_mode
-                            )
-                        for member in service['members']:
-                            if member['status'] in update_if_status:
-                                # create the entry for this
-                                # member in the return status
-                                # dictionary set to ACTIVE
-                                if not member['id'] in members:
-                                    members[member['id']] = \
-                                        {'status': plugin_const.INACTIVE}
-                                # check if it down or up by monitor
-                                # and update the status
-                                for state in monitor_states:
-                                    # matched the pool member
-                                    # by address and port number
-                                    if member['address'] == \
-                                            strip_domain_address(
-                                            state['addr']) and \
-                                            int(member['protocol_port']) == \
-                                            int(state['port']):
-                                        # if the monitor says member is up
-                                        if state['state'] == \
-                                                'MONITOR_STATUS_UP' or \
-                                           state['state'] == \
-                                                'MONITOR_STATUS_UNCHECKED':
-                                            # set ACTIVE as long as the
-                                            # status was not set to 'DOWN'
-                                            # on another BIG-IP
-                                            if members[
-                                                member['id']]['status'] != \
-                                                    'DOWN':
-                                                if member['admin_state_up']:
-                                                    members[member['id']][
-                                                        'status'] = \
-                                                        plugin_const.ACTIVE
-                                                else:
-                                                    members[member['id']][
-                                                        'status'] = \
-                                                        plugin_const.INACTIVE
-                                        else:
-                                            members[member['id']]['status'] = \
-                                                plugin_const.DOWN
-        stats['members'] = members
-        return stats
+        try:
+            # sum virtual server stats for all BIG-IPs
+            vs_stats = self.lbaas_builder.get_listener_stats(service, stats)
+
+            # convert to bytes
+            lb_stats[lb_const.STATS_IN_BYTES] = \
+                vs_stats['clientside.bitsIn']/8
+            lb_stats[lb_const.STATS_OUT_BYTES] = \
+                vs_stats['clientside.bitsOut']/8
+            lb_stats[lb_const.STATS_ACTIVE_CONNECTIONS] = \
+                vs_stats['clientside.curConns']
+            lb_stats[lb_const.STATS_TOTAL_CONNECTIONS] = \
+                vs_stats['clientside.totConns']
+
+            # update Neutron
+            self.plugin_rpc.update_loadbalancer_stats(
+                loadbalancer['id'], lb_stats)
+        except Exception as e:
+            LOG.error("Error getting loadbalancer stats: %s", e.message)
+
+        finally:
+            return lb_stats
 
     @serialized('remove_orphans')
     def remove_orphans(self, all_loadbalancers):
@@ -1035,31 +970,180 @@ class iControlDriver(LBaaSBaseDriver):
                       % bigip.hostname)
             self.cluster_manager.save_config(bigip)
 
+    def _get_monitor_endpoint(self, bigip, service):
+        monitor_type = self.service_adapter.get_monitor_type(service)
+        if not monitor_type:
+            monitor_type = ""
+
+        if monitor_type == "HTTPS":
+            hm = bigip.tm.ltm.monitor.https_s.https
+        elif monitor_type == "TCP":
+            hm = bigip.tm.ltm.monitor.tcps.tcp
+        elif monitor_type == "PING":
+            hm = bigip.tm.ltm.monitor.gateway_icmps.gateway_icmp
+        else:
+            hm = bigip.tm.ltm.monitor.https.http
+
+        return hm
+
+    def service_rename_required(self, service):
+        rename_required = False
+
+        # Returns whether the bigip has a pool for the service
+        if not service['loadbalancer']:
+            return False
+
+        bigips = self.get_config_bigips()
+        loadbalancer = service['loadbalancer']
+
+        # Does the correctly named virtual address exist?
+        for bigip in bigips:
+            virtual_address = VirtualAddress(self.service_adapter,
+                                             loadbalancer)
+            if not virtual_address.exists(bigip):
+                rename_required = True
+                break
+
+        return rename_required
+
+    def service_object_teardown(self, service):
+
+        # Returns whether the bigip has a pool for the service
+        if not service['loadbalancer']:
+            return False
+
+        bigips = self.get_config_bigips()
+        loadbalancer = service['loadbalancer']
+        folder_name = self.service_adapter.get_folder_name(
+            loadbalancer['tenant_id']
+        )
+
+        # Change to bigips
+        for bigip in bigips:
+
+            # Delete all virtuals
+            v = bigip.tm.ltm.virtuals.virtual
+            for listener in service['listeners']:
+                l_name = listener.get("name", "")
+                if not l_name:
+                    svc = {"loadbalancer": loadbalancer,
+                           "listener": listener}
+                    vip = self.service_adapter.get_virtual(svc)
+                    l_name = vip['name']
+                if v.exists(name=l_name, partition=folder_name):
+                    # Found a virtual that is named by the OS object,
+                    # delete it.
+                    l_obj = v.load(name=l_name, partition=folder_name)
+                    LOG.warn("Deleting listener: /%s/%s" %
+                             (folder_name, l_name))
+                    l_obj.delete(name=l_name, partition=folder_name)
+
+            # Delete all pools
+            p = bigip.tm.ltm.pools.pool
+            for os_pool in service['pools']:
+                p_name = os_pool.get('name', "")
+                if not p_name:
+                    svc = {"loadbalancer": loadbalancer,
+                           "pool": os_pool}
+                    pool = self.service_adapter.get_pool(svc)
+                    p_name = pool['name']
+
+                if p.exists(name=p_name, partition=folder_name):
+                    p_obj = p.load(name=p_name, partition=folder_name)
+                    LOG.warn("Deleting pool: /%s/%s" % (folder_name, p_name))
+                    p_obj.delete(name=p_name, partition=folder_name)
+
+            # Delete all healthmonitors
+            for healthmonitor in service['healthmonitors']:
+                svc = {'loadbalancer': loadbalancer,
+                       'healthmonitor': healthmonitor}
+                monitor_ep = self._get_monitor_endpoint(bigip, svc)
+
+                m_name = healthmonitor.get('name', "")
+                if not m_name:
+                    hm = self.service_adapter.get_healthmonitor(svc)
+                    m_name = hm['name']
+
+                if monitor_ep.exists(name=m_name, partition=folder_name):
+                    m_obj = monitor_ep.load(name=m_name, partition=folder_name)
+                    LOG.warn("Deleting monitor: /%s/%s" % (
+                        folder_name, m_name))
+                    m_obj.delete()
+
     def _service_exists(self, service):
         # Returns whether the bigip has a pool for the service
         if not service['loadbalancer']:
             return False
         loadbalancer = service['loadbalancer']
 
-        bigip = self.get_bigip()
         folder_name = self.service_adapter.get_folder_name(
             loadbalancer['tenant_id']
         )
 
-        # Does the tenant folder exist?
-        if not self.system_helper.folder_exists(bigip, folder_name):
-            return False
-
-        # Ensure that each virtual service exists.
-        # TODO(Rich Browne): check the listener status instead, this can be
-        # used to detemine the health of the service.
-        for listener in service['listeners']:
-            svc = {'loadbalancer': loadbalancer,
-                   'listener': listener}
-            if not self.lbaas_builder.listener_exists(svc, bigip):
+        # Foreach bigip in the cluster:
+        for bigip in self.get_config_bigips():
+            # Does the tenant folder exist?
+            if not self.system_helper.folder_exists(bigip, folder_name):
+                LOG.error("Folder %s does not exists on bigip: %s" %
+                          (folder_name, bigip.hostname))
                 return False
 
+            # Get the virtual address
+            virtual_address = VirtualAddress(self.service_adapter,
+                                             loadbalancer)
+            if not virtual_address.exists(bigip):
+                LOG.error("Virtual address %s(%s) does not "
+                          "exists on bigip: %s" % (virtual_address.name,
+                                                   virtual_address.address,
+                                                   bigip.hostname))
+                return False
+
+            # Ensure that each virtual service exists.
+            for listener in service['listeners']:
+
+                svc = {"loadbalancer": loadbalancer,
+                       "listener": listener}
+                virtual_server = self.service_adapter.get_virtual_name(svc)
+                if not self.vs_manager.exists(bigip,
+                                              name=virtual_server['name'],
+                                              partition=folder_name):
+                    LOG.error("Virtual /%s/%s not found on bigip: %s" %
+                              (virtual_server['name'], folder_name,
+                               bigip.hostname))
+                    return False
+
+            # Ensure that each virtual service exists.
+            for pool in service['pools']:
+                svc = {"loadbalancer": loadbalancer,
+                       "pool": pool}
+                bigip_pool = self.service_adapter.get_pool(svc)
+                if not self.pool_manager.exists(
+                        bigip,
+                        name=bigip_pool['name'],
+                        partition=folder_name):
+                    LOG.error("Pool /%s/%s not found on bigip: %s" %
+                              (bigip_pool['name'], folder_name,
+                               bigip.hostname))
+                    return False
+
+            for healthmonitor in service['healthmonitors']:
+                svc = {"loadbalancer": loadbalancer,
+                       "healthmonitor": healthmonitor}
+                monitor = self.service_adapter.get_healthmonitor(svc)
+                monitor_ep = self._get_monitor_endpoint(bigip, svc)
+                if not monitor_ep.exists(name=monitor['name'],
+                                         partition=folder_name):
+                    LOG.error("Monitor /%s/%s not found on bigip: %s" %
+                              (monitor['name'], folder_name, bigip.hostname))
+                    return False
+
         return True
+
+    def get_loadbalancers_in_tenant(self, tenant_id):
+        loadbalancers = self.plugin_rpc.get_all_loadbalancers()
+
+        return [lb['lb_id'] for lb in loadbalancers
+                if lb['tenant_id'] == tenant_id]
 
     def _common_service_handler(self, service, delete_partition=False):
         # Assure that the service is configured on bigip(s)
@@ -1076,8 +1160,6 @@ class iControlDriver(LBaaSBaseDriver):
 
             traffic_group = self.service_to_traffic_group(service)
             service['loadbalancer']['traffic_group'] = traffic_group
-
-            LOG.debug("XXXXXXXXXX: traffic group created ")
 
             # This loop will only run once.  Using while as a control-flow
             # mechanism to flatten out the code by allowing breaks.
@@ -1115,7 +1197,6 @@ class iControlDriver(LBaaSBaseDriver):
                 break
 
             all_subnet_hints = {}
-            LOG.debug("XXXXXXXXXX: getting bigip configs")
             for bigip in self.get_config_bigips():
                 # check_for_delete_subnets:
                 #     keep track of which subnets we should check to delete
@@ -1143,6 +1224,7 @@ class iControlDriver(LBaaSBaseDriver):
             if delete_partition:
                 self.tenant_manager.assure_tenant_cleanup(service,
                                                           all_subnet_hints)
+
         except Exception as err:
             LOG.exception(err)
 
@@ -1151,6 +1233,9 @@ class iControlDriver(LBaaSBaseDriver):
 
     def _update_service_status(self, service):
         """Update status of objects in OpenStack """
+
+        LOG.debug("_update_service_status")
+
         if not self.plugin_rpc:
             LOG.error("Cannot update status in Neutron without "
                       "RPC handler.")
@@ -1172,6 +1257,11 @@ class iControlDriver(LBaaSBaseDriver):
         if 'listeners' in service:
             # Call update_listener_status
             self._update_listener_status(service)
+        if 'l7policy_rules' in service:
+            self._update_l7rule_status(service['l7policy_rules'])
+        if 'l7policies' in service:
+            self._update_l7policy_status(service['l7policies'])
+
         self._update_loadbalancer_status(service)
 
     def _update_member_status(self, members):
@@ -1254,6 +1344,48 @@ class iControlDriver(LBaaSBaseDriver):
                         lb_const.OFFLINE)
 
     @log_helpers.log_method_call
+    def _update_l7rule_status(self, l7rules):
+        """Update l7rule status in OpenStack """
+        for l7rule in l7rules:
+            if 'provisioning_status' in l7rule:
+                provisioning_status = l7rule['provisioning_status']
+                if (provisioning_status == plugin_const.PENDING_CREATE or
+                        provisioning_status == plugin_const.PENDING_UPDATE):
+                        self.plugin_rpc.update_l7rule_status(
+                            l7rule['id'],
+                            l7rule['policy_id'],
+                            plugin_const.ACTIVE,
+                            lb_const.ONLINE
+                        )
+                elif provisioning_status == plugin_const.PENDING_DELETE:
+                    self.plugin_rpc.l7rule_destroyed(
+                        l7rule['id'])
+                elif provisioning_status == plugin_const.ERROR:
+                    self.plugin_rpc.update_l7rule_status(
+                        l7rule['id'], l7rule['policy_id'])
+
+    @log_helpers.log_method_call
+    def _update_l7policy_status(self, l7policies):
+        LOG.debug("_update_l7policy_status")
+        """Update l7policy status in OpenStack """
+        for l7policy in l7policies:
+            if 'provisioning_status' in l7policy:
+                provisioning_status = l7policy['provisioning_status']
+                if (provisioning_status == plugin_const.PENDING_CREATE or
+                        provisioning_status == plugin_const.PENDING_UPDATE):
+                        self.plugin_rpc.update_l7policy_status(
+                            l7policy['id'],
+                            plugin_const.ACTIVE,
+                            lb_const.ONLINE
+                        )
+                elif provisioning_status == plugin_const.PENDING_DELETE:
+                    LOG.debug("calling l7policy_destroyed")
+                    self.plugin_rpc.l7policy_destroyed(
+                        l7policy['id'])
+                elif provisioning_status == plugin_const.ERROR:
+                    self.plugin_rpc.update_l7policy_status(l7policy['id'])
+
+    @log_helpers.log_method_call
     def _update_loadbalancer_status(self, service):
         """Update loadbalancer status in OpenStack """
         loadbalancer = service['loadbalancer']
@@ -1280,6 +1412,8 @@ class iControlDriver(LBaaSBaseDriver):
                 loadbalancer['id'],
                 provisioning_status,
                 lb_const.OFFLINE)
+        elif provisioning_status == plugin_const.ACTIVE:
+            LOG.debug('Loadbalancer provisioning status is active')
         else:
             LOG.error('Loadbalancer provisioning status is invalid')
 
@@ -1379,3 +1513,45 @@ class iControlDriver(LBaaSBaseDriver):
                 % (hostname, f5const.MIN_TMOS_MAJOR_VERSION,
                    f5const.MIN_TMOS_MINOR_VERSION))
         return major_version, minor_version
+
+    @serialized('create_l7policy')
+    @is_connected
+    def create_l7policy(self, l7policy, service):
+        """Create lb l7policy"""
+        LOG.debug("Creating l7policy")
+        self._common_service_handler(service)
+
+    @serialized('update_l7policy')
+    @is_connected
+    def update_l7policy(self, old_l7policy, l7policy, service):
+        """Update lb l7policy"""
+        LOG.debug("Updating l7policy")
+        self._common_service_handler(service)
+
+    @serialized('delete_l7policy')
+    @is_connected
+    def delete_l7policy(self, l7policy, service):
+        """Delete lb l7policy"""
+        LOG.debug("Deleting l7policy")
+        self._common_service_handler(service)
+
+    @serialized('create_l7rule')
+    @is_connected
+    def create_l7rule(self, pool, service):
+        """Create lb l7rule"""
+        LOG.debug("Creating l7rule")
+        self._common_service_handler(service)
+
+    @serialized('update_l7rule')
+    @is_connected
+    def update_l7rule(self, old_l7rule, l7rule, service):
+        """Update lb l7rule"""
+        LOG.debug("Updating l7rule")
+        self._common_service_handler(service)
+
+    @serialized('delete_l7rule')
+    @is_connected
+    def delete_l7rule(self, l7rule, service):
+        """Delete lb l7rule"""
+        LOG.debug("Deleting l7rule")
+        self._common_service_handler(service)

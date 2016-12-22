@@ -1,70 +1,86 @@
-.PHONY: all systest functest \
-	functest-setup functest-install functest-run functest-teardown \
+.PHONY: all clean pre-build unit systest functest disconnected_service \
+disconnected_service-setup \
+disconnected_service-install disconnected_service-run \
+disconnected_service-teardown
 
-repo := https://github.com/zancas/f5-openstack-agent.git
-registry := docker-registry.pdbld.f5net.com
-namespace := openstack
+PROJECT := f5-openstack-agent
+repo := https://github.com/F5Networks/$(PROJECT).git
 ssh_conf := testenv_symbols/testenv_ssh_config
+
+MAKEFILE_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 
 # - <nearest reachable tag>-<num commits since>-g<abbreviated commit id>
 version := $(shell git describe --long)
-export version
-timestamp := $(shell date +"%Y%m%d-%H%M%S")
-export timestamp
-results_dir := test_results/proxy/proxy-$(version)-$(timestamp)
+timestamp ?= $(shell date +"%Y%m%d-%H%M%S")
+export timestamp   # Only eval timestamp in the top make.
+RESULTSDIR := $(MAKEFILE_DIR)/test_results/$(PROJECT)
 
-func_session := os-agent-neutronless_$(version)
+unit_session := unit_$(version)_$(timestamp)
+tempest_session := tempest_$(version)_$(timestamp)
+disconnected_session := disconnected_$(version)_$(timestamp)
 
-current_branch := $(shell git rev-parse --abbrev-ref HEAD)
+unit_results := $(RESULTSDIR)/$(unit_session)
+disconnected_results := $(RESULTSDIR)/$(disconnected_session)
+
+branch := $(shell git rev-parse --abbrev-ref HEAD)
+testenv_config := bigip.testenv.yaml
+
+VENV := buildbot
+VENV_ACTIVATE := $(MAKEFILE_DIR)/$(VENV)/bin/activate
+
+# Before we run any tests we need a virtualenv and a few packages
+pre-build:
+	sudo apt-get update; \
+	sudo apt-get install -y libssl-dev; \
+	sudo apt-get install -y libffi-dev; \
+	sudo -H pip install tox; \
+	sudo -H pip install git+ssh://git@bldr-git.int.lineratesystems.com/tools/testenv.git; \
+	sudo -H pip install git+ssh://git@bldr-git.int.lineratesystems.com/velcro/systest-common.git; \
+	sudo -H pip install git+ssh://git@bldr-git.int.lineratesystems.com/tools/pytest-meta.git; \
+	sudo -H pip install git+ssh://git@bldr-git.int.lineratesystems.com/tools/pytest-autolog.git; \
+	sudo -H pip install git+ssh://git@bldr-git.int.lineratesystems.com/tools/pytest-symbols.git;
+
+unit: pre-build
+	cd $(MAKEFILE_DIR)/../; \
+	tox -e unit --sitepackages -- \
+		--exclude incomplete no_regression \
+		--autolog-outputdir $(unit_results) \
+		--autolog-session $(unit_session) \
 
 functest:
+	$(MAKE) -C . unit
+	$(MAKE) -j -C . functest_all
+
+functest_all:
 	@echo "automated functional tests..."
-	$(MAKE) -C . functest-setup && \
-	$(MAKE) -C . functest-install && \
-	$(MAKE) -C . functest-run && \
-	$(MAKE) -C . functest-teardown
+	$(MAKE) -C . disconnected_service
 
-functest-setup:
+disconnected_service:
+	$(MAKE) -C . disconnected_service-setup
+	$(MAKE) -C . disconnected_service-run
+	$(MAKE) -C . disconnected_service-teardown
+
+disconnected_service-setup: pre-build
 	@echo "setting up functional test environment ..."
-	testenv create --name os-agent-neutronless \
-		--config os-agent-neutronless.testenv.yaml \
-		|| true && \
-	echo `date "+%s"` && \
-	sleep 360 && \
-	echo `date "+%s"`
+	testenv create base; \
+	testenv create --name $(disconnected_session) --config $(testenv_config); \
 
-functest-install:
-	@echo "installing system tests ..."
-	scp -rp -F $(ssh_conf) testenv_symbols/ bastion:~/
-	scp -F $(ssh_conf) ./scripts/install_systests.sh bastion:~/
-	ssh -AF $(ssh_conf) bastion "~/install_systests.sh $(repo) $(current_branch)"
+disconnected_service-run: pre-build
+	@echo "running disconnected tests ..."
+	tox -e functest --sitepackage -- \
+		--symbols $(MAKEFILE_DIR)/testenv_symbols/testenv_symbols.json \
+		--exclude incomplete no_regression \
+		--autolog-outputdir $(disconnected_results) \
+		--autolog-session $(disconnected_session) \
+		neutronless/disconnected_service || $(MAKE) -C . disconnected_service-teardown
 
-unittest-run:
-	scp -F $(ssh_conf) ./scripts/run_unittests.sh bastion:~/
-	ssh -tF $(ssh_conf) bastion \
-		"~/run_unittests.sh $(func_session)" \
-		|| true
+disconnected_service-teardown:
+	@echo "tearing down functional test environment..."
+	if [ ! -e $(disconnected_results) ]; then mkdir -p $(disconnected_results); fi
+	if [ ! -e $(unit_results) ]; then mkdir -p $(unit_results); fi
+	testenv delete --name $(disconnected_session) --config $(testenv_config)
 
-neutronless-run:
-	scp -F $(ssh_conf) ./scripts/run_neutronlesstests.sh bastion:~/
-	ssh -tF $(ssh_conf) bastion \
-		"~/run_neutronlesstests.sh $(func_session)" \
-		|| true
-
-functest-run:
-	@echo "running unittests tests ..."
-	$(MAKE) -C . unittest-run
-	@echo "unittests done..."
-	@echo "running neutronless tests ..."
-	$(MAKE) -C . neutronless-run
-	@echo "neutronless done..."
-
-functest-teardown:
-	@echo "downloading functional test results ..."
-	if [ ! -e $(results_dir) ]; then mkdir -p $(results_dir); fi
-	scp -rp -F $(ssh_conf) \
-		bastion:~/test_results/$(func_session)/* $(results_dir)/ \
-		|| true
-
-	@echo "tearing down functional test environment ..."
-	testenv delete --name os-agent-neutronless || true
+# Remove the buildbot venv directory and any tox venvs we made
+clean:
+	-rm -rf $(MAKEFILE_DIR)/../.tox/functest-buildbot
+	-rm -rf $(MAKEFILE_DIR)/../.tox/unit-buildbot

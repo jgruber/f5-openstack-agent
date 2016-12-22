@@ -11,29 +11,22 @@ Release Highlights
 
 This release introduces the following:
 
-- Hierarchical port binding
+- Unattached pools
+- L7 routing
+- Loadbalancer statistics
 - Bug fixes
 
-See the `changelog <https://github.com/F5Networks/f5-openstack-agent/compare/v9.0.2...v9.0.3>`_ for the full list of changes in this release.
+See the `changelog <https://github.com/F5Networks/f5-openstack-agent/compare/v9.1.0...v9.2.0.b1>`_ for the full list of changes in this release.
 
 Caveats
 -------
-
-The following features are unsupported in v |release|:
-
-* `BIG-IP® vCMP® <https://f5.com/resources/white-papers/virtual-clustered-multiprocessing-vcmp>`_
-* Agent High Availability (HA)
-* Differentiated environments
-* Unattached pools
-* L7 routing
-* Loadbalancer statistics
 
 Open Issues
 -----------
 
 See the `project issues page <https://github.com/F5Networks/f5-openstack-agent/issues>`_ for a full list of open issues in this release.
 
-Documentation can be found on `Read the Docs <http://f5-openstack-lbaasv2-driver.readthedocs.io/en/latest/release_notes.html>`_.
+Documentation can be found on `Read the Docs <http://f5-openstack-agent.readthedocs.io/en/latest/release_notes.html>`_.
 
 
 

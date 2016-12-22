@@ -169,7 +169,13 @@ class DisconnectedService(object):
     def is_service_connected(self, service):
         networks = service['networks']
         network_id = service['loadbalancer']['network_id']
-        segmentation_id = networks[network_id]['provider:segmentation_id']
+        network = networks.get(network_id, {})
+
+        if network.get('provider:network_type', "") == "flat":
+            return True
+
+        segmentation_id = network.get('provider:segmentation_id', 0)
+
         return (segmentation_id)
 
     def is_virtual_connected(self, virtual, bigips):
@@ -209,6 +215,4 @@ class DisconnectedService(object):
 
     @log_helpers.log_method_call
     def delete_network(self, bigip, partition):
-        tf = bigip.tm.net.tunnels.tunnels.tunnel
-        if tf.exists(name=self.network_name, partition=partition):
-            tf.load(name=self.network_name, partition=partition).delete()
+        self.network_helper.delete_tunnel(bigip, self.network_name, partition)
