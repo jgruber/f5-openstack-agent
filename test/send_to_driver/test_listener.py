@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+'''
+test_requirements = {'devices':         [VE],
+                     'openstack_infra': []}
+
+'''
 # Copyright 2015-2106 F5 Networks Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,37 +21,41 @@
 
 import json
 
-from f5.bigip import BigIP
-from f5_openstack_agent.lbaasv2.drivers.bigip.pool_service import \
-    PoolServiceBuilder
+from f5_openstack_agent.lbaasv2.drivers.bigip.listener_service import \
+    ListenerServiceBuilder
 from f5_openstack_agent.lbaasv2.drivers.bigip.loadbalancer_service import \
     LoadBalancerServiceBuilder
 
 
-def test_create_listener():
+def test_create_listener(bigip):
+    bigips = [bigip]
     lb_service = LoadBalancerServiceBuilder()
-    pool_builder = PoolServiceBuilder()
-    bigips = [BigIP('10.190.5.7', 'admin', 'admin')]
-    service = json.load(open("service.json"))["service"]
+    listener_builder = ListenerServiceBuilder()
+    service = json.load(open("../../service.json"))["service"]
 
     try:
         # create partition
         lb_service.prep_service(service, bigips)
 
         # create BIG-IP® virtual servers
-        pools = service["pools"]
+        listeners = service["listeners"]
         loadbalancer = service["loadbalancer"]
 
-        for pool in pools:
+        for listener in listeners:
             # create a service object in form expected by builder
             svc = {"loadbalancer": loadbalancer,
-                   "pool": pool}
+                   "listener": listener}
 
             # create
-            pool_builder.create_pool(svc, bigips)
+            listener_builder.create_listener(svc, bigips)
+
+            # validate
+            l = listener_builder.get_listener(svc, bigips[0])
+            assert l.name == listener["name"]
+            print "Created listener: " + l.name
 
             # delete
-            pool_builder.delete_pool(svc, bigips)
+            listener_builder.delete_listener(svc, bigips)
 
     finally:
         lb_service.delete_partition(service, bigips)
