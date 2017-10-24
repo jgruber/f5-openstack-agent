@@ -626,7 +626,7 @@ class LBaaSv2PluginRPC(object):
         try:
             loadbalancers = self._call(
                 self.context,
-                self._make_msg('get_pending_loadbalancers',
+                self._make_msg('get_errored_loadbalancers',
                                env=env,
                                group=group,
                                host=host),
