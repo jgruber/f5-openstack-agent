@@ -126,7 +126,7 @@ class LBaaSBuilder(object):
                 ip_address=loadbalancer["vip_address"])
 
         if loadbalancer['provisioning_status'] == plugin_const.ERROR:
-            loadbalancer['provisioning_status'] = plugin_const.ACTIVE
+            loadbalancer['provisioning_status'] = plugin_const.PENDING_UPDATE
             service['loadbalancer'] = loadbalancer
             self.driver._update_loadbalancer_status(service, timed_out=False)
 
