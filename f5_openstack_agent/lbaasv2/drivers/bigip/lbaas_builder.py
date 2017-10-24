@@ -125,6 +125,11 @@ class LBaaSBuilder(object):
                 subnet_id=loadbalancer["vip_subnet_id"],
                 ip_address=loadbalancer["vip_address"])
 
+        if loadbalancer['provisioning_status'] == plugin_const.ERROR:
+            loadbalancer['provisioning_status'] = plugin_const.ACTIVE
+            service['loadbalancer'] = loadbalancer
+            self.driver._update_loadbalancer_status(service, timed_out=False)
+
         self._update_subnet_hints(loadbalancer["provisioning_status"],
                                   loadbalancer["vip_subnet_id"],
                                   loadbalancer["network_id"],
