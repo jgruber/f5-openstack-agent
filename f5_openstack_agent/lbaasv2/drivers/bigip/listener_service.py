@@ -683,8 +683,10 @@ class ListenerServiceBuilder(object):
             vip_persist = self.service_adapter.get_session_persistence(svc)
             vs.update(vip_persist)
 
+        network_id = svc['loadbalancer']['network_id']
         for bigip in bigips:
             try:
+                self.service_adapter.get_vlan(vs, bigip, network_id)
                 # update VS back to original listener definition
                 self.vs_helper.update(bigip, vs)
 
